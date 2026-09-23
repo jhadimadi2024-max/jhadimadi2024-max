@@ -1,0 +1,14 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+.env.local
+!.env.example
+
+# Runtime secrets / production-generated state
+data/admin_credentials.json
+data/.admin_secret
+data/*.runtime.json
