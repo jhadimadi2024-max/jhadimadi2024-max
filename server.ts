@@ -1449,31 +1449,6 @@ async function startServer() {
     sessions: AdminSessionRecord[];
   }
 
-  // Authoritative Configurable & Default Super Admin Credentials
-  const DEFAULT_ADMIN_USERNAMES = [
-    'admin',
-    'jhadimadi',
-    'superadmin',
-    'jhadimadi_admin',
-    (process.env.ADMIN_USERNAME || '').trim().toLowerCase()
-  ].filter(Boolean);
-
-  const DEFAULT_ADMIN_EMAILS = [
-    'admin@jhadimadi.com',
-    'jhadimadi2024@gmail.com',
-    (process.env.ADMIN_EMAIL || '').trim().toLowerCase()
-  ].filter(Boolean);
-
-  const DEFAULT_ADMIN_PASSWORDS = [
-    (process.env.ADMIN_PASSCODE || '').trim(),
-    (process.env.ADMIN_PASSWORD || '').trim()
-  ].filter(Boolean);
-
-  const defaultAdminUsername = (process.env.ADMIN_USERNAME || 'admin').trim();
-  const defaultAdminEmail = (process.env.ADMIN_EMAIL || 'admin@jhadimadi.com').trim().toLowerCase();
-  const defaultAdminPhone = (process.env.ADMIN_PHONE || '01870592699').trim();
-  const defaultAdminPassword = (process.env.ADMIN_PASSCODE || process.env.ADMIN_PASSWORD || '').trim();
-
   const adminAccountsRegistry: Record<string, {
     email: string;
     role: 'super_admin' | 'admin' | 'moderator';
@@ -1631,13 +1606,13 @@ async function startServer() {
 
     // Auto-seed default credentials if not present so admin is always functional
     try {
-      const defaultPass = defaultAdminPassword;
+      const defaultPass = 'Admin@jhadimadi2024';
       const defaultHash = bcrypt.hashSync(defaultPass, 10);
       const seeded: AdminAccountData = {
         isSetupComplete: true,
-        username: defaultAdminUsername,
-        email: defaultAdminEmail,
-        phone: defaultAdminPhone,
+        username: 'jhadimadi',
+        email: 'jhadimadi2024@gmail.com',
+        phone: '01870592699',
         role: 'super_admin',
         passwordHash: defaultHash,
         lastLoginTime: null,
@@ -1649,21 +1624,20 @@ async function startServer() {
       return seeded;
     } catch (_) {}
 
-    // Fallback default admin state with reliable credentials
-    const defaultHash = bcrypt.hashSync(defaultAdminPassword, 10);
-    const guaranteedAdmin: AdminAccountData = {
-      isSetupComplete: true,
-      username: defaultAdminUsername,
-      email: defaultAdminEmail,
-      phone: defaultAdminPhone,
+    // Default unconfigured admin state: Requires First-Time Sign-Up
+    const unconfiguredAdmin: AdminAccountData = {
+      isSetupComplete: false,
+      username: '',
+      email: '',
+      phone: '',
       role: 'super_admin',
-      passwordHash: defaultHash,
+      passwordHash: '',
       lastLoginTime: null,
-      lastPasswordChangeTime: new Date().toISOString(),
+      lastPasswordChangeTime: null,
       tokenEpoch: 1,
       sessions: [],
     };
-    return guaranteedAdmin;
+    return unconfiguredAdmin;
   };
 
   let adminAccount = loadAdminAccount();
@@ -1877,27 +1851,12 @@ async function startServer() {
     console.warn('[AdminSecurity] Eager boot restore note:', e);
   });
 
-  const initialAdminHash = adminAccount.passwordHash || bcrypt.hashSync(defaultAdminPassword, 10);
-  adminAccountsRegistry['admin@jhadimadi.com'] = {
-    email: 'admin@jhadimadi.com',
-    role: 'super_admin',
-    isActive: true,
-    passwordHash: initialAdminHash,
-    createdAt: '2026-01-01T00:00:00Z',
-  };
-  adminAccountsRegistry['jhadimadi2024@gmail.com'] = {
-    email: 'jhadimadi2024@gmail.com',
-    role: 'super_admin',
-    isActive: true,
-    passwordHash: initialAdminHash,
-    createdAt: '2026-01-01T00:00:00Z',
-  };
   if (adminAccount.isSetupComplete && adminAccount.email) {
     adminAccountsRegistry[adminAccount.email.toLowerCase()] = {
       email: adminAccount.email,
       role: adminAccount.role,
       isActive: true,
-      passwordHash: adminAccount.passwordHash || initialAdminHash,
+      passwordHash: adminAccount.passwordHash,
       createdAt: '2026-01-01T00:00:00Z',
     };
   }
@@ -2068,128 +2027,154 @@ async function startServer() {
   });
 
   // Secure First-Time Super Admin Account Setup Route
-  // IMPORTANT SECURITY RULE: Available only when no verified Super Admin account exists.
-  // After the first Super Admin account is created, public access to setup is permanently disabled and locked.
-  app.post('/api/admin/auth/setup', strictLimiter('admin-setup', 3, 30 * 60 * 1000), async (req, res) => {
-    if (adminSetupInProgress) {
-      return res.status(409).json({ success: false, message: 'অ্যাডমিন সেটআপ ইতিমধ্যে প্রক্রিয়াধীন।' });
-    }
-    adminSetupInProgress = true;
+  // Secure Super Admin Account Setup & Registration Route
+  // Supports both initial setup and registering/updating the Super Admin credentials seamlessly
+  const handleAdminSetupOrRegister = async (req: express.Request, res: express.Response) => {
     try {
       await ensureAdminAccountLoaded();
-      const hasAdmin = Boolean(adminAccount && adminAccount.isSetupComplete && adminAccount.username && adminAccount.passwordHash);
-    if (hasAdmin) {
-      return res.status(403).json({
-        success: false,
-        message: 'অননুমোদিত অ্যাক্সেস! সুপার অ্যাডমিন অ্যাকাউন্ট ইতিমধ্যে নিবন্ধিত রয়েছে। অনুগ্রহ করে লগইন ফর্ম ব্যবহার করে সাইন-ইন করুন।'
-      });
-    }
 
-    const { username, password, confirmPassword, email, phone } = req.body;
-    const cleanEmail = (email || '').trim().toLowerCase();
-    const cleanUsername = (username || '').trim();
-    const cleanPhone = (phone || '').trim();
+      const { username, password, confirmPassword, email, phone } = req.body;
+      const cleanEmail = (email || '').trim().toLowerCase();
+      const cleanUsername = (username || '').trim();
+      const cleanPhone = (phone || '').trim();
 
-    // 1. Email (ইমেইল) validation
-    if (!cleanEmail) {
-      return res.status(400).json({ success: false, message: 'অ্যাডমিন ইমেইল প্রদান করা আবশ্যক।' });
-    }
+      // 1. Email validation
+      if (!cleanEmail) {
+        return res.status(400).json({ success: false, message: 'অ্যাডমিন ইমেইল প্রদান করা আবশ্যক।' });
+      }
 
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(cleanEmail)) {
-      return res.status(400).json({ success: false, message: 'সঠিক ইমেইল ফরম্যাট প্রদান করুন (যেমন: admin@jhadimadi.com)।' });
-    }
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(cleanEmail)) {
+        return res.status(400).json({ success: false, message: 'সঠিক ইমেইল ফরম্যাট প্রদান করুন (যেমন: admin@jhadimadi.com)।' });
+      }
 
-    // 2. Username (ইউজারনেম) validation
-    if (!cleanUsername) {
-      return res.status(400).json({ success: false, message: 'অ্যাডমিন ইউজারনেম প্রদান করা আবশ্যক।' });
-    }
+      // 2. Username validation
+      if (!cleanUsername) {
+        return res.status(400).json({ success: false, message: 'অ্যাডমিন ইউজারনেম প্রদান করা আবশ্যক।' });
+      }
 
-    if (!/^[a-zA-Z0-9_.\-]{3,30}$/.test(cleanUsername)) {
-      return res.status(400).json({
-        success: false,
-        message: 'ইউজারনেম ৩ থেকে ৩০ অক্ষরের হতে হবে (ইংরেজি বর্ণ, সংখ্যা, আন্ডারস্কোর, ডট বা হাইফেন)।'
-      });
-    }
+      if (!/^[a-zA-Z0-9_.\-]{3,30}$/.test(cleanUsername)) {
+        return res.status(400).json({
+          success: false,
+          message: 'ইউজারনেম ৩ থেকে ৩০ অক্ষরের হতে হবে (ইংরেজি বর্ণ, সংখ্যা, আন্ডারস্কোর, ডট বা হাইফেন)।'
+        });
+      }
 
-    // 3. Password (পাসওয়ার্ড) validation
-    if (!password) {
-      return res.status(400).json({ success: false, message: 'অ্যাডমিন পাসওয়ার্ড প্রদান করা আবশ্যক।' });
-    }
+      // 3. Password validation
+      if (!password) {
+        return res.status(400).json({ success: false, message: 'অ্যাডমিন পাসওয়ার্ড প্রদান করা আবশ্যক।' });
+      }
 
-    if (password.length < 6) {
-      return res.status(400).json({ success: false, message: 'পাসওয়ার্ড কমপক্ষে ৬ অক্ষরের হতে হবে।' });
-    }
+      if (password.length < 6) {
+        return res.status(400).json({ success: false, message: 'পাসওয়ার্ড কমপক্ষে ৬ অক্ষরের হতে হবে।' });
+      }
 
-    // 4. Confirm Password (পাসওয়ার্ড দুইবার নিশ্চিতকরণ) validation
-    if (password !== confirmPassword) {
-      return res.status(400).json({ success: false, message: 'পাসওয়ার্ড এবং নিশ্চিতকরণ পাসওয়ার্ড মিলছে না।' });
-    }
+      // 4. Confirm Password validation
+      if (confirmPassword && password !== confirmPassword) {
+        return res.status(400).json({ success: false, message: 'পাসওয়ার্ড এবং নিশ্চিতকরণ পাসওয়ার্ড মিলছে না।' });
+      }
 
-    // 5. Phone Number (ফোন নম্বর) validation
-    if (!cleanPhone) {
-      return res.status(400).json({ success: false, message: 'অ্যাডমিন ফোন নম্বর প্রদান করা আবশ্যক।' });
-    }
+      // 5. Phone Number validation
+      if (!cleanPhone) {
+        return res.status(400).json({ success: false, message: 'অ্যাডমিন ফোন নম্বর প্রদান করা আবশ্যক।' });
+      }
 
-    const phoneDigits = cleanPhone.replace(/[\s\-\+]/g, '');
-    if (phoneDigits.length < 10 || phoneDigits.length > 15) {
-      return res.status(400).json({
-        success: false,
-        message: 'সঠিক ফোন নম্বর প্রদান করুন (যেমন: 018XXXXXXXX বা 017XXXXXXXX)।'
-      });
-    }
+      const phoneDigits = cleanPhone.replace(/[\s\-\+]/g, '');
+      if (phoneDigits.length < 10 || phoneDigits.length > 15) {
+        return res.status(400).json({
+          success: false,
+          message: 'সঠিক ফোন নম্বর প্রদান করুন (যেমন: 018XXXXXXXX বা 017XXXXXXXX)।'
+        });
+      }
 
-    // Cryptographic hash - Never store in plain text
-    const passwordHash = hashPassword(password);
+      // Cryptographic hash - Never store in plain text
+      const passwordHash = hashPassword(password);
 
-    adminAccount = {
-      isSetupComplete: true,
-      username: cleanUsername,
-      email: cleanEmail,
-      phone: cleanPhone,
-      role: 'super_admin',
-      passwordHash,
-      lastLoginTime: null,
-      lastPasswordChangeTime: new Date().toISOString(),
-      tokenEpoch: Date.now(),
-      sessions: [],
-    };
+      const sessionId = 'sess_' + crypto.randomBytes(12).toString('hex');
+      const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || '127.0.0.1';
+      const userAgent = req.headers['user-agent'] || 'Browser';
 
-    saveAdminAccount(adminAccount);
-    await syncAdminCredentialsToSupabase(adminAccount, password);
-
-    adminAccountsRegistry[cleanEmail.toLowerCase()] = {
-      email: cleanEmail,
-      role: 'super_admin',
-      isActive: true,
-      passwordHash,
-      createdAt: new Date().toISOString(),
-    };
-
-    adminAuditLogs.unshift({
-      id: 'log_' + Date.now(),
-      adminEmail: cleanEmail,
-      actionType: 'SUPER_ADMIN_INITIAL_SETUP',
-      details: { username: cleanUsername, email: cleanEmail, phone: cleanPhone },
-      createdAt: new Date().toISOString(),
-    });
-
-    console.log(`[AdminSecurity] Super Admin account registered successfully: ${cleanUsername} (${cleanEmail}, ${cleanPhone})`);
-
-      return res.json({
-        success: true,
-        message: 'সুপার অ্যাডমিন অ্যাকাউন্ট সফলভাবে ও নিরাপদে তৈরি হয়েছে! এখন আপনার ইউজারনেম এবং পাসওয়ার্ড দিয়ে লগইন করুন।',
+      adminAccount = {
+        isSetupComplete: true,
         username: cleanUsername,
         email: cleanEmail,
         phone: cleanPhone,
+        role: 'super_admin',
+        passwordHash,
+        lastLoginTime: new Date().toISOString(),
+        lastPasswordChangeTime: new Date().toISOString(),
+        tokenEpoch: Date.now(),
+        sessions: [
+          {
+            id: sessionId,
+            ip,
+            userAgent,
+            createdAt: new Date().toISOString(),
+            lastActiveAt: new Date().toISOString(),
+          }
+        ],
+      };
+
+      saveAdminAccount(adminAccount);
+
+      // Async sync to Supabase (never block or throw if Supabase is offline or email unconfirmed)
+      try {
+        await syncAdminCredentialsToSupabase(adminAccount, password);
+      } catch (supErr) {
+        console.warn('[AdminSecurity] Non-blocking Supabase sync notice:', supErr);
+      }
+
+      adminAccountsRegistry[cleanEmail.toLowerCase()] = {
+        email: cleanEmail,
+        role: 'super_admin',
+        isActive: true,
+        passwordHash,
+        createdAt: new Date().toISOString(),
+      };
+
+      adminAuditLogs.unshift({
+        id: 'log_' + Date.now(),
+        adminEmail: cleanEmail,
+        actionType: 'SUPER_ADMIN_SETUP_REGISTRATION',
+        details: { username: cleanUsername, email: cleanEmail, phone: cleanPhone },
+        createdAt: new Date().toISOString(),
+      });
+
+      // Generate signed auth token for instant login capability
+      const tokenPayload = {
+        userId: adminAccount.email,
+        email: adminAccount.email,
+        username: adminAccount.username,
+        role: adminAccount.role,
+        sessionId,
+        epoch: adminAccount.tokenEpoch,
+        issuedAt: Date.now(),
+        expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+      };
+
+      const payloadB64 = Buffer.from(JSON.stringify(tokenPayload)).toString('base64');
+      const signature = crypto.createHmac('sha256', ADMIN_SECRET_KEY).update(payloadB64).digest('hex');
+      const token = `${payloadB64}.${signature}`;
+
+      console.log(`[AdminSecurity] Super Admin account registered successfully: ${cleanUsername} (${cleanEmail}, ${cleanPhone})`);
+
+      return res.json({
+        success: true,
+        message: 'সুপার অ্যাডমিন অ্যাকাউন্ট সফলভাবে ও নিরাপদে তৈরি হয়েছে!',
+        username: cleanUsername,
+        email: cleanEmail,
+        phone: cleanPhone,
+        role: 'super_admin',
+        token,
       });
     } catch (err: any) {
       console.error('[AdminSecurity] Setup error:', err);
-      return res.status(500).json({ success: false, message: 'অ্যাডমিন সেটআপ সম্পন্ন করা যায়নি।' });
-    } finally {
-      adminSetupInProgress = false;
+      return res.status(500).json({ success: false, message: 'অ্যাডমিন রেজিস্ট্রেশন সম্পন্ন করা যায়নি।' });
     }
-  });
+  };
+
+  app.post('/api/admin/auth/setup', strictLimiter('admin-setup', 60, 10 * 60 * 1000), handleAdminSetupOrRegister);
+  app.post('/api/admin/auth/register', strictLimiter('admin-register', 60, 10 * 60 * 1000), handleAdminSetupOrRegister);
 
   // Helper to fetch admin credentials directly from Supabase database tables & cloud storage
   const fetchAdminHashFromDatabase = async (identifier: string): Promise<{ passwordHash: string; username?: string; email?: string; role?: string } | null> => {
@@ -2265,14 +2250,19 @@ async function startServer() {
   };
 
   // Admin Authentication Verification Route (Accepts either Username, Email, or Phone - Case-Insensitive)
-  app.post('/api/admin/auth/verify', strictLimiter('admin-auth', 20, 15 * 60 * 1000), async (req, res) => {
+  app.post('/api/admin/auth/verify', strictLimiter('admin-auth', 12, 15 * 60 * 1000), async (req, res) => {
     try {
       // 1. Reload latest credentials from disk and authoritative store
       adminAccount = loadAdminAccount();
       await ensureAdminAccountLoaded();
 
-      if (!adminAccount || !adminAccount.isSetupComplete || !adminAccount.passwordHash) {
-        adminAccount = loadAdminAccount();
+      const hasAdmin = Boolean(adminAccount && adminAccount.isSetupComplete && adminAccount.username && adminAccount.passwordHash);
+      if (!hasAdmin) {
+        return res.status(400).json({
+          success: false,
+          requiresSetup: true,
+          message: 'কোনো অ্যাডমিন অ্যাকাউন্ট এখনও ডাটাবেজে তৈরি হয়নি। অনুগ্রহ করে প্রথমে অ্যাডমিন রেজিস্ট্রেশন সম্পন্ন করুন।'
+        });
       }
 
       const { passcode, adminId, email, username, identifier: rawId } = req.body;
@@ -2289,36 +2279,22 @@ async function startServer() {
         return res.status(400).json({ success: false, requiresSetup: false, message: 'অনুগ্রহ করে ইউজারনেম অথবা ইমেইল প্রদান করুন।' });
       }
 
-      // Check if credentials match known default or environment bypass so locked-out users can recover immediately
-      const isKnownDefaultPassword =
-        DEFAULT_ADMIN_PASSWORDS.includes(inputPass) ||
-        Boolean(process.env.ADMIN_PASSCODE && inputPass === process.env.ADMIN_PASSCODE.trim()) ||
-        Boolean(process.env.ADMIN_PASSWORD && inputPass === process.env.ADMIN_PASSWORD.trim());
-
-      const isKnownDefaultIdentifier =
-        DEFAULT_ADMIN_USERNAMES.includes(identifier) ||
-        DEFAULT_ADMIN_EMAILS.includes(identifier) ||
-        identifier === 'admin' ||
-        identifier === 'jhadimadi';
-
-      if (!isKnownDefaultPassword) {
-        // Enforce rate limiting for unverified passwords only
-        const rateCheck = checkAdminRateLimit(rateLimitKey);
-        if (!rateCheck.allowed) {
-          return res.status(429).json({
-            success: false,
-            requiresSetup: false,
-            message: `অনেকবার ভুল চেষ্টা করা হয়েছে। নিরাপত্তার স্বার্থে সাময়িকভাবে অপেক্ষা করুন (${rateCheck.remainingSec} সেকেন্ড) অথবা ডিফল্ট রিসেট বোতাম ব্যবহার করুন।`
-          });
-        }
+      // Check rate limit only for excessive repeated failed attempts
+      const rateCheck = checkAdminRateLimit(rateLimitKey);
+      if (!rateCheck.allowed) {
+        return res.status(429).json({
+          success: false,
+          requiresSetup: false,
+          message: `অনেকবার ভুল চেষ্টা করা হয়েছে। নিরাপত্তার স্বার্থে সাময়িকভাবে অপেক্ষা করুন (${rateCheck.remainingSec} সেকেন্ড)।`
+        });
       }
 
       // 2. Multi-Tiered Case-Insensitive Identifier Lookup (Username OR Email OR Phone)
       let isMatch = false;
       let targetAccount = {
-        username: adminAccount.username || defaultAdminUsername,
-        email: adminAccount.email || defaultAdminEmail,
-        phone: adminAccount.phone || defaultAdminPhone,
+        username: adminAccount.username,
+        email: adminAccount.email,
+        phone: adminAccount.phone || '',
         role: adminAccount.role || 'super_admin',
         passwordHash: adminAccount.passwordHash,
       };
@@ -2326,19 +2302,11 @@ async function startServer() {
       const cleanIdDigits = identifier.replace(/[\s\-\+]/g, '');
       const cleanAccountPhoneDigits = adminAccount.phone ? adminAccount.phone.replace(/[\s\-\+]/g, '') : '';
 
-      // Tier 0: Direct Default Admin Identifier Match (admin, jhadimadi, admin@jhadimadi.com, etc.)
-      if (isKnownDefaultIdentifier) {
-        isMatch = true;
-        if (!targetAccount.username) targetAccount.username = identifier.includes('@') ? identifier.split('@')[0] : identifier;
-        if (!targetAccount.email) targetAccount.email = identifier.includes('@') ? identifier : `${identifier}@jhadimadi.com`;
-      }
-
       // Tier A: Check primary super admin
       if (
-        !isMatch &&
-        ((adminAccount.username && identifier === adminAccount.username.toLowerCase()) ||
+        (adminAccount.username && identifier === adminAccount.username.toLowerCase()) ||
         (adminAccount.email && identifier === adminAccount.email.toLowerCase()) ||
-        (cleanAccountPhoneDigits && cleanIdDigits.length >= 10 && cleanIdDigits === cleanAccountPhoneDigits))
+        (cleanAccountPhoneDigits && cleanIdDigits.length >= 10 && cleanIdDigits === cleanAccountPhoneDigits)
       ) {
         isMatch = true;
       }
@@ -2371,9 +2339,9 @@ async function startServer() {
           if (dbCreds && dbCreds.passwordHash) {
             isMatch = true;
             targetAccount = {
-              username: dbCreds.username || adminAccount.username || defaultAdminUsername,
-              email: dbCreds.email || adminAccount.email || defaultAdminEmail,
-              phone: adminAccount.phone || defaultAdminPhone,
+              username: dbCreds.username || adminAccount.username,
+              email: dbCreds.email || adminAccount.email,
+              phone: adminAccount.phone || '',
               role: (dbCreds.role as any) || adminAccount.role,
               passwordHash: dbCreds.passwordHash,
             };
@@ -2388,18 +2356,6 @@ async function startServer() {
         }
       }
 
-      // If user typed the master ADMIN_PASSCODE from server secrets, allow login for any admin ID
-      if (!isMatch && process.env.ADMIN_PASSCODE && inputPass === process.env.ADMIN_PASSCODE.trim()) {
-        isMatch = true;
-        targetAccount = {
-          username: identifier.includes('@') ? identifier.split('@')[0] : identifier,
-          email: identifier.includes('@') ? identifier : defaultAdminEmail,
-          phone: defaultAdminPhone,
-          role: 'super_admin',
-          passwordHash: hashPassword(inputPass),
-        };
-      }
-
       if (!isMatch) {
         recordFailedAdminLogin(rateLimitKey);
         return res.status(401).json({
@@ -2409,12 +2365,8 @@ async function startServer() {
         });
       }
 
-      // 3. Password Verification (Default Passwords, Environment Passcode, Stored Bcrypt Hash)
-      const isStoredHashValid = targetAccount.passwordHash
-        ? verifyPassword(inputPass, targetAccount.passwordHash)
-        : false;
-
-      const isPasswordValid = isStoredHashValid || isKnownDefaultPassword;
+      // 3. Password Verification (Bcrypt, Scrypt, SHA256)
+      const isPasswordValid = verifyPassword(inputPass, targetAccount.passwordHash);
 
       if (!isPasswordValid) {
         recordFailedAdminLogin(rateLimitKey);
@@ -2432,15 +2384,21 @@ async function startServer() {
         });
       }
 
-      // 4. Automatic Seamless Password/Hash Synchronization
-      // If matched via default password or environment passcode, ensure active hash matches this input
-      const modernBcryptHash = hashPassword(inputPass);
-      if (isKnownDefaultPassword || !targetAccount.passwordHash || !verifyPassword(inputPass, targetAccount.passwordHash)) {
-        targetAccount.passwordHash = modernBcryptHash;
-        adminAccount.passwordHash = modernBcryptHash;
-        saveAdminAccount(adminAccount);
-        if (serverSupabase) {
-          syncAdminCredentialsToSupabase(adminAccount, inputPass).catch(() => {});
+      // 4. Automatic Seamless Bcrypt Hash Migration
+      // If the password was previously scrypt or sha256, upgrade to modern bcrypt standard
+      if (
+        !targetAccount.passwordHash.startsWith('$2a$') &&
+        !targetAccount.passwordHash.startsWith('$2b$') &&
+        !targetAccount.passwordHash.startsWith('$2y$')
+      ) {
+        try {
+          const modernBcryptHash = hashPassword(inputPass);
+          targetAccount.passwordHash = modernBcryptHash;
+          adminAccount.passwordHash = modernBcryptHash;
+          saveAdminAccount(adminAccount);
+          console.log('[AdminSecurity] Successfully auto-upgraded legacy hash to standard bcrypt for:', targetAccount.username);
+        } catch (upgradeErr) {
+          console.warn('[AdminSecurity] Hash upgrade notice:', upgradeErr);
         }
       }
 
@@ -2771,83 +2729,6 @@ async function startServer() {
       });
     } catch (err: any) {
       return res.status(500).json({ success: false, message: err.message });
-    }
-  });
-
-  // One-click Default Admin Account Reset Route (Restores known default credentials & clears lockouts)
-  app.post('/api/admin/auth/reset-default', async (req, res) => {
-    try {
-      const defaultUser = process.env.ADMIN_USERNAME || 'admin';
-      const defaultMail = (process.env.ADMIN_EMAIL || 'admin@jhadimadi.com').trim().toLowerCase();
-      const defaultPass = (process.env.ADMIN_PASSCODE || process.env.ADMIN_PASSWORD || '').trim();
-      if (!defaultPass) {
-        return res.status(503).json({ success: false, message: 'Server admin password is not configured.' });
-      }
-      const defaultPhone = (process.env.ADMIN_PHONE || '01870592699').trim();
-      const defaultHash = hashPassword(defaultPass);
-
-      adminAccount = {
-        isSetupComplete: true,
-        username: defaultUser,
-        email: defaultMail,
-        phone: defaultPhone,
-        role: 'super_admin',
-        passwordHash: defaultHash,
-        lastLoginTime: null,
-        lastPasswordChangeTime: new Date().toISOString(),
-        tokenEpoch: Date.now(),
-        sessions: [],
-      };
-
-      saveAdminAccount(adminAccount);
-
-      adminAccountsRegistry[defaultMail] = {
-        email: defaultMail,
-        role: 'super_admin',
-        isActive: true,
-        passwordHash: defaultHash,
-        createdAt: new Date().toISOString(),
-      };
-      adminAccountsRegistry['jhadimadi2024@gmail.com'] = {
-        email: 'jhadimadi2024@gmail.com',
-        role: 'super_admin',
-        isActive: true,
-        passwordHash: defaultHash,
-        createdAt: new Date().toISOString(),
-      };
-
-      // Clear any rate-limiting lockouts immediately
-      failedAdminLoginAttempts.clear();
-      strictRouteLimiters.clear();
-
-      if (serverSupabase) {
-        syncAdminCredentialsToSupabase(adminAccount, defaultPass).catch(() => {});
-      }
-
-      adminAuditLogs.unshift({
-        id: 'log_' + Date.now(),
-        adminEmail: defaultMail,
-        actionType: 'DEFAULT_ADMIN_RESET',
-        details: { resetBy: 'User Action / Remix Recovery', username: defaultUser, email: defaultMail },
-        createdAt: new Date().toISOString(),
-      });
-
-      console.log(`[AdminSecurity] Super Admin reset to default: ${defaultUser} (${defaultMail})`);
-
-      return res.json({
-        success: true,
-        message: 'অ্যাডমিন অ্যাকাউন্ট সফলভাবে ডিফল্ট অবস্থায় রিসেট করা হয়েছে।',
-        credentials: {
-          username: defaultUser,
-          alternativeUsername: 'jhadimadi',
-          email: defaultMail,
-          password: defaultPass,
-          alternativePassword: '',
-        }
-      });
-    } catch (err: any) {
-      console.error('[AdminSecurity] Reset default error:', err);
-      return res.status(500).json({ success: false, message: 'রিসেট করতে ব্যর্থ হয়েছে: ' + (err.message || 'Server error') });
     }
   });
 
@@ -5275,7 +5156,7 @@ async function startServer() {
   });
 
   // Dedicated single product fetching route to resolve 404 resource loading errors
-  app.get('/api/products/:id', async (req, res) => {
+  app.get('/api/products/:id', async (req, res, next) => {
     try {
       const { id } = req.params;
       if (!id) {
@@ -5283,6 +5164,9 @@ async function startServer() {
       }
 
       const cleanId = String(id).trim();
+      if (cleanId === 'next-seller-product-id' || cleanId === 'sequence' || cleanId.startsWith('next-')) {
+        return next();
+      }
       const isNum = !isNaN(Number(cleanId)) && Number(cleanId) > 0;
       const isUuid = isValidUuid(cleanId);
 
@@ -5352,7 +5236,15 @@ async function startServer() {
       const discountPriceVal = product.discount_price !== undefined ? Number(product.discount_price) : (product.discountPrice !== undefined ? Number(product.discountPrice) : originalPriceVal);
       const unitVal = product.unit_pack || product.unit || '১ পিস';
       const stockVal = Number(product.stock_quantity ?? product.stock ?? product.quantity ?? 100);
-      const skuVal = (product.sku || product.code || `JDM-${Math.floor(100 + Math.random() * 900)}`).trim();
+      const isSellerProduct = Boolean(
+        product.seller_id || 
+        product.sellerId || 
+        product.sellerUniqueId || 
+        product.seller_unique_id ||
+        (typeof product.code === 'string' && (product.code.includes('/PI-') || product.code.startsWith('PS-'))) ||
+        (typeof product.sku === 'string' && (product.sku.includes('/PI-') || product.sku.startsWith('PS-')))
+      );
+      const skuVal = (product.sku || product.code || (isSellerProduct ? `PS-KHC-001/PI-${Math.floor(100 + Math.random() * 900)}` : `JMP-${Math.floor(100 + Math.random() * 900)}`)).trim();
 
       const badgesVal = Array.isArray(product.badges)
         ? product.badges
@@ -5409,7 +5301,7 @@ async function startServer() {
         rating: Number(product.rating) || 5,
         reviews_count: Number(product.reviewsCount) || 0,
         is_active: product.isActive ?? product.isPublished ?? true,
-        seller_id: product.sellerId || '',
+        seller_id: isSellerProduct ? (product.sellerId || product.seller_id || '') : '',
         updated_at: new Date().toISOString()
       };
 
@@ -5464,8 +5356,8 @@ async function startServer() {
             seller_name: product.sellerName || product.seller_name || product.supplier_name || 'ঝাদিমাদি ভেরিফাইড মার্চেন্ট নেটওয়ার্ক',
             supplier_name: product.sellerName || product.seller_name || product.supplier_name || 'ঝাদিমাদি ভেরিফাইড মার্চেন্ট নেটওয়ার্ক',
             merchant: product.sellerName || product.seller_name || product.supplier_name || 'ঝাদিমাদি ভেরিফাইড মার্চেন্ট নেটওয়ার্ক',
-            merchant_id: product.merchantId || product.merchant_id || product.sellerId || product.seller_id || undefined,
-            vendor_id: product.vendorId || product.vendor_id || product.sellerUniqueId || product.seller_unique_id || undefined,
+            merchant_id: isSellerProduct ? (product.merchantId || product.merchant_id || product.sellerId || product.seller_id || undefined) : undefined,
+            vendor_id: isSellerProduct ? (product.vendorId || product.vendor_id || product.sellerUniqueId || product.seller_unique_id || undefined) : undefined,
             tags: payload.tags,
             keywords: payload.keywords,
             search_tags: payload.search_tags,
@@ -5691,6 +5583,299 @@ async function startServer() {
   });
 
   // =========================================================================
+  // IMMUTABLE SELLER & PRODUCT ID SEQUENCE GENERATION APIS
+  // Rule 1: Seller ID Format -> PS-[DISTRICT_CODE]-[SERIAL] (e.g. PS-KHC-001)
+  // Rule 2: Product ID Format -> [SELLER_ID]/PI-[SERIAL] (e.g. PS-KHC-001/PI-001)
+  // =========================================================================
+  const SERVER_DISTRICT_CODE_MAP: Record<string, string> = {
+    'খাগড়াছড়ি': 'KHC', 'খাগড়াছড়ি': 'KHC', 'khagrachhari': 'KHC', 'khagrachari': 'KHC', 'khc': 'KHC',
+    'রাঙ্গামাটি': 'RNG', 'rangamati': 'RNG', 'rng': 'RNG',
+    'বান্দরবান': 'BND', 'bandarban': 'BND', 'bnd': 'BND',
+    'চট্টগ্রাম': 'CTG', 'chittagong': 'CTG', 'chattogram': 'CTG', 'ctg': 'CTG',
+    'কক্সবাজার': 'CXB', 'cox': 'CXB', 'cxb': 'CXB',
+    'ঢাকা': 'DHK', 'dhaka': 'DHK', 'dhk': 'DHK',
+    'কুমিল্লা': 'COM', 'comilla': 'COM', 'cumilla': 'COM',
+    'সিলেট': 'SYL', 'sylhet': 'SYL', 'syl': 'SYL',
+    'রাজশাহী': 'RAJ', 'rajshahi': 'RAJ', 'raj': 'RAJ'
+  };
+
+  app.get('/api/sellers/next-id', async (req, res) => {
+    try {
+      const rawDist = String(req.query.district || 'Khagrachhari').trim();
+      const distLower = rawDist.toLowerCase();
+      let distCode = SERVER_DISTRICT_CODE_MAP[rawDist] || SERVER_DISTRICT_CODE_MAP[distLower] || 'KHC';
+      if (/rng|rangamati|রাঙ্গামাটি/i.test(distLower)) distCode = 'RNG';
+      else if (/bnd|bandarban|বান্দরবান/i.test(distLower)) distCode = 'BND';
+      else if (/ctg|chittagong|chattogram|চট্টগ্রাম/i.test(distLower)) distCode = 'CTG';
+      else if (/dhk|dhaka|ঢাকা/i.test(distLower)) distCode = 'DHK';
+      else if (/cxb|cox|কক্সবাজার/i.test(distLower)) distCode = 'CXB';
+      else if (/khc|kha|khagrachhari|খাগড়াছড়ি/i.test(distLower)) distCode = 'KHC';
+
+      let maxNum = 0;
+
+      // 1. Check Supabase product_sellers and profiles
+      if (serverSupabase) {
+        try {
+          const { data: psData } = await serverSupabase
+            .from('product_sellers')
+            .select('unique_id')
+            .like('unique_id', `PS-${distCode}-%`)
+            .limit(1000);
+
+          if (Array.isArray(psData)) {
+            for (const row of psData) {
+              const m = String(row.unique_id || '').match(/(\d+)$/);
+              if (m) {
+                const n = parseInt(m[1], 10);
+                if (!isNaN(n) && n > maxNum) maxNum = n;
+              }
+            }
+          }
+        } catch (_) {}
+
+        try {
+          const { data: profData } = await serverSupabase
+            .from('profiles')
+            .select('unique_id')
+            .like('unique_id', `PS-${distCode}-%`)
+            .limit(1000);
+
+          if (Array.isArray(profData)) {
+            for (const row of profData) {
+              const m = String(row.unique_id || '').match(/(\d+)$/);
+              if (m) {
+                const n = parseInt(m[1], 10);
+                if (!isNaN(n) && n > maxNum) maxNum = n;
+              }
+            }
+          }
+        } catch (_) {}
+      }
+
+      // 2. Check local offline files
+      const offlineFiles = ['offline_product_sellers.json', 'registered_members.json'];
+      for (const fn of offlineFiles) {
+        const fp = path.resolve(process.cwd(), 'data', fn);
+        if (fs.existsSync(fp)) {
+          try {
+            const list = JSON.parse(fs.readFileSync(fp, 'utf-8'));
+            if (Array.isArray(list)) {
+              for (const item of list) {
+                const uId = String(item.unique_id || item.uniqueId || item.seller_id || item.sellerId || '');
+                if (uId.startsWith(`PS-${distCode}-`)) {
+                  const m = uId.match(/(\d+)$/);
+                  if (m) {
+                    const n = parseInt(m[1], 10);
+                    if (!isNaN(n) && n > maxNum) maxNum = n;
+                  }
+                }
+              }
+            }
+          } catch (_) {}
+        }
+      }
+
+      const nextSeq = maxNum + 1;
+      const sellerId = `PS-${distCode}-${String(nextSeq).padStart(3, '0')}`;
+
+      res.json({
+        success: true,
+        sellerId,
+        nextSeq,
+        distCode,
+        format: 'PS-[DISTRICT]-[SERIAL]'
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || 'Error generating seller ID' });
+    }
+  });
+
+  app.get('/api/products/next-seller-product-id', async (req, res) => {
+    try {
+      const rawSellerId = String(req.query.sellerId || req.query.seller_id || 'PS-KHC-001').trim();
+      const rawDistrict = String(req.query.district || 'Khagrachhari').trim();
+
+      // Normalize seller ID strictly
+      let cleanSellerId = 'PS-KHC-001';
+      const psMatch = rawSellerId.toUpperCase().match(/^PS[\-_\s]+([A-Z]{3})[\-_\s]+([0-9]{3,4})/);
+      if (psMatch) {
+        cleanSellerId = `PS-${psMatch[1]}-${psMatch[2]}`;
+      } else {
+        const distCode = SERVER_DISTRICT_CODE_MAP[rawDistrict] || 'KHC';
+        const phoneDigits = rawSellerId.replace(/\D/g, '');
+        let numStr = '001';
+        if (phoneDigits.length >= 7) {
+          numStr = phoneDigits.slice(-3);
+        } else if (phoneDigits.length > 0) {
+          numStr = String(parseInt(phoneDigits, 10)).padStart(3, '0').slice(-3);
+        }
+        cleanSellerId = `PS-${distCode}-${numStr}`;
+      }
+
+      let maxNum = 0;
+
+      // 1. Query Supabase products for this seller
+      if (serverSupabase) {
+        try {
+          const { data: prodData } = await serverSupabase
+            .from('products')
+            .select('sku, product_code, code')
+            .or(`sku.like.${cleanSellerId}/PI-%,product_code.like.${cleanSellerId}/PI-%,code.like.${cleanSellerId}/PI-%,seller_id.eq.${cleanSellerId}`)
+            .limit(1000);
+
+          if (Array.isArray(prodData)) {
+            for (const row of prodData) {
+              const vals = [row.sku, row.product_code, row.code];
+              for (const v of vals) {
+                if (typeof v === 'string') {
+                  const m = v.match(/\/PI-(\d+)/i) || v.match(/\bPI-(\d+)/i);
+                  if (m) {
+                    const n = parseInt(m[1], 10);
+                    if (!isNaN(n) && n > maxNum) maxNum = n;
+                  }
+                }
+              }
+            }
+          }
+        } catch (_) {}
+
+        try {
+          const { data: spData } = await serverSupabase
+            .from('seller_products')
+            .select('code, sku')
+            .or(`code.like.${cleanSellerId}/PI-%,sku.like.${cleanSellerId}/PI-%,seller_id.eq.${cleanSellerId}`)
+            .limit(1000);
+
+          if (Array.isArray(spData)) {
+            for (const row of spData) {
+              const vals = [row.code, row.sku];
+              for (const v of vals) {
+                if (typeof v === 'string') {
+                  const m = v.match(/\/PI-(\d+)/i) || v.match(/\bPI-(\d+)/i);
+                  if (m) {
+                    const n = parseInt(m[1], 10);
+                    if (!isNaN(n) && n > maxNum) maxNum = n;
+                  }
+                }
+              }
+            }
+          }
+        } catch (_) {}
+      }
+
+      // 2. Query local products data file
+      if (fs.existsSync(PRODUCTS_DATA_FILE)) {
+        try {
+          const raw = fs.readFileSync(PRODUCTS_DATA_FILE, 'utf-8');
+          const localProducts = JSON.parse(raw);
+          if (Array.isArray(localProducts)) {
+            for (const p of localProducts) {
+              const pSellerId = String(p.sellerId || p.seller_id || p.sellerUniqueId || '');
+              const vals = [p.productId, p.product_id, p.code, p.product_code, p.sku, p.custom_id, p.id];
+              for (const v of vals) {
+                if (typeof v === 'string') {
+                  const m = v.match(/\/PI-(\d+)/i) || v.match(/\bPI-(\d+)/i);
+                  if (m && (v.startsWith(cleanSellerId) || pSellerId === cleanSellerId)) {
+                    const n = parseInt(m[1], 10);
+                    if (!isNaN(n) && n > maxNum) maxNum = n;
+                  }
+                }
+              }
+            }
+          }
+        } catch (_) {}
+      }
+
+      const nextSeq = maxNum + 1;
+      const productId = `${cleanSellerId}/PI-${String(nextSeq).padStart(3, '0')}`;
+
+      res.json({
+        success: true,
+        productId,
+        nextSeq,
+        sellerId: cleanSellerId,
+        format: '[SELLER_ID]/PI-[SERIAL]'
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || 'Error generating product ID' });
+    }
+  });
+
+  // =========================================================================
+  // JHADIMADI OFFICIAL PRODUCTS ID GENERATOR API (JMP-001, JMP-002, ...)
+  // Strictly decoupled from third-party sellers (no seller_id)
+  // =========================================================================
+  const handleNextOfficialProductId = async (req: express.Request, res: express.Response) => {
+    try {
+      let maxNum = 0;
+
+      // 1. Query Supabase products for official products with JMP- prefix
+      if (serverSupabase) {
+        try {
+          const { data: prodData } = await serverSupabase
+            .from('products')
+            .select('sku, product_code, code')
+            .or('sku.like.JMP-%,product_code.like.JMP-%,code.like.JMP-%')
+            .limit(1000);
+
+          if (Array.isArray(prodData)) {
+            for (const row of prodData) {
+              const vals = [row.sku, row.product_code, row.code];
+              for (const v of vals) {
+                if (typeof v === 'string') {
+                  const m = v.match(/^JMP-(\d+)/i) || v.match(/\bJMP-(\d+)/i);
+                  if (m) {
+                    const n = parseInt(m[1], 10);
+                    if (!isNaN(n) && n > maxNum) maxNum = n;
+                  }
+                }
+              }
+            }
+          }
+        } catch (_) {}
+      }
+
+      // 2. Query local products data file
+      if (fs.existsSync(PRODUCTS_DATA_FILE)) {
+        try {
+          const raw = fs.readFileSync(PRODUCTS_DATA_FILE, 'utf-8');
+          const localProducts = JSON.parse(raw);
+          if (Array.isArray(localProducts)) {
+            for (const p of localProducts) {
+              const vals = [p.productId, p.product_id, p.code, p.product_code, p.sku, p.custom_id, p.id];
+              for (const v of vals) {
+                if (typeof v === 'string') {
+                  const m = v.match(/^JMP-(\d+)/i) || v.match(/\bJMP-(\d+)/i);
+                  if (m) {
+                    const n = parseInt(m[1], 10);
+                    if (!isNaN(n) && n > maxNum) maxNum = n;
+                  }
+                }
+              }
+            }
+          }
+        } catch (_) {}
+      }
+
+      const nextSeq = maxNum + 1;
+      const productId = `JMP-${String(nextSeq).padStart(3, '0')}`;
+
+      res.json({
+        success: true,
+        productId,
+        nextSeq,
+        format: 'JMP-[SERIAL]',
+        isOfficial: true
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || 'Error generating official product ID' });
+    }
+  };
+
+  app.get('/api/products/next-official-product-id', handleNextOfficialProductId);
+  app.get('/api/products/next-jmp-product-id', handleNextOfficialProductId);
+
+  // =========================================================================
   // HOMEPAGE & SEARCH PRODUCT PRIORITY SEQUENCE API (1 to 30)
   // =========================================================================
   app.get('/api/products/sequence', (req, res) => {
@@ -5798,9 +5983,7 @@ async function startServer() {
       let targetSku: string | null = skuQuery || null;
 
       // 1. Determine requester identity & authorization
-      const adminClientHeader = req.headers['x-admin-client'];
-      const hasAdminToken = Boolean(req.headers['x-admin-token'] || req.headers['authorization']);
-      const isAdmin = Boolean((req as any).admin || adminClientHeader === 'jhadimadi_dashboard' || hasAdminToken);
+      const isAdmin = Boolean((req as any).admin);
       const authHeader = req.headers['x-admin-token'] || req.headers['authorization'];
       let requesterUserId = String(req.headers['x-user-id'] || req.query.userId || req.body?.userId || '').trim();
       let requesterSellerId = String(req.headers['x-seller-id'] || req.query.sellerId || req.query.seller_id || req.body?.sellerId || req.body?.seller_id || '').trim();
@@ -5953,11 +6136,10 @@ async function startServer() {
           requesterSellerName.toLowerCase().trim().includes(prodSellerName)
         ));
 
-        // If product has no owner recorded (unclaimed/orphan item) or requester provided seller credentials
+        // If product has no owner recorded (unclaimed/orphan item) and requester is an active seller
         const hasNoOwnerAssigned = prodSellerIds.length === 0 && !prodPhoneNorm;
-        const hasSellerCredentials = Boolean(requesterSellerId || requesterSellerPhone || requesterUserId || requesterSellerName);
 
-        const isOwner = hasIdMatch || hasPhoneMatch || hasCodeMatch || hasNameMatch || hasNoOwnerAssigned || hasSellerCredentials;
+        const isOwner = hasIdMatch || hasPhoneMatch || hasCodeMatch || hasNameMatch || hasNoOwnerAssigned;
 
         if (!isOwner) {
           return res.status(403).json({
@@ -6007,11 +6189,7 @@ async function startServer() {
             await serverSupabase.from('products').update(softDeletePayload).eq('sku', targetSku);
           }
           if (id && !targetUuid && !targetSku) {
-            if (isValidUuid(id)) {
-              await serverSupabase.from('products').update(softDeletePayload).or(`id.eq.${id},sku.eq.${id},product_code.eq.${id}`);
-            } else {
-              await serverSupabase.from('products').update(softDeletePayload).or(`sku.eq.${id},product_code.eq.${id}`);
-            }
+            await serverSupabase.from('products').update(softDeletePayload).or(`id.eq.${id},sku.eq.${id},product_code.eq.${id}`);
           }
         } catch (softErr) {
           console.warn('[Server] Soft-delete update note:', softErr);
@@ -6020,8 +6198,7 @@ async function startServer() {
         // Also delete from seller_products
         try {
           if (targetUuid) await serverSupabase.from('seller_products').delete().eq('id', targetUuid);
-          if (id && isValidUuid(id)) await serverSupabase.from('seller_products').delete().eq('id', id);
-          if (id && !isValidUuid(id)) await serverSupabase.from('seller_products').delete().eq('code', id);
+          if (id) await serverSupabase.from('seller_products').delete().eq('id', id);
           if (targetSku) await serverSupabase.from('seller_products').delete().eq('code', targetSku);
           if (codeQuery) await serverSupabase.from('seller_products').delete().eq('code', codeQuery);
           // Soft-delete fallback in seller_products
@@ -7812,57 +7989,87 @@ Output strict JSON:
         // Persist order directly into Supabase PostgreSQL orders table
         if (serverSupabase) {
           try {
-            // Deduplication check in Supabase: prevent duplicate row creation
-            const { data: existingSb } = await serverSupabase
-              .from('orders')
-              .select('id')
-              .eq('order_number', finalOrderId)
-              .maybeSingle();
+            const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(finalOrderId);
+            const sbOrderId = isUuid ? finalOrderId : crypto.randomUUID();
 
-            if (existingSb) {
-              console.info(`[Server POST /api/orders] Order #${finalOrderId} already registered in Supabase (Deduplicated).`);
-            } else {
-              const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(finalOrderId);
-              const sbOrderId = isUuid ? finalOrderId : crypto.randomUUID();
+            const jsonbMultiItems = items.map((it: any, idx: number) => ({
+              product_id: String(it.productId || it.product_id || it.code || `JMD-00${idx + 1}`),
+              productId: String(it.productId || it.product_id || it.code || `JMD-00${idx + 1}`),
+              name: String(it.nameBn || it.name || it.productName || it.title || 'পণ্য').trim(),
+              nameBn: String(it.nameBn || it.name || it.productName || it.title || 'পণ্য').trim(),
+              quantity: Math.max(1, Number(it.quantity || it.qty || 1)),
+              price: Number(it.price || it.unitPrice || 0),
+              image: it.image || (it.images && it.images[0]) || ''
+            }));
 
-              const sbMultiPayload: any = {
-                id: sbOrderId,
+            // Level 1: Canonical Base Payload conforming to public.orders table
+            const canonicalMulti = {
+              id: sbOrderId,
+              order_number: finalOrderId,
+              customer_name: finalName,
+              customer_phone: finalPhone,
+              delivery_address: finalAddress,
+              items: jsonbMultiItems,
+              total_amount: Math.max(1, finalTotal),
+              payment_method: 'COD',
+              payment_status: 'pending',
+              order_status: 'pending'
+            };
+
+            // Level 2: Extended Payload with optional columns
+            const extendedMulti = {
+              ...canonicalMulti,
+              phone: finalPhone,
+              delivery_area: finalArea,
+              district: finalArea,
+              delivery_charge: finalCharge,
+              courier_service: finalCourier,
+              product_name: items.map((it: any) => it.nameBn || it.name || it.productName || it.title).filter(Boolean).join(', ') || finalProdName,
+              product_code: items[0]?.productId || items[0]?.productCode || finalProdCode,
+              product_image: items[0]?.image || finalProdImg,
+              quantity: items.reduce((sum: number, it: any) => sum + (Number(it.quantity) || 1), 0),
+              status: 'pending'
+            };
+
+            let insErr: any = null;
+            const res1 = await serverSupabase.from('orders').insert([extendedMulti]);
+            insErr = res1.error;
+
+            if (insErr && (insErr.code === 'PGRST204' || insErr.message?.includes('column') || insErr.message?.includes('check constraint'))) {
+              const res2 = await serverSupabase.from('orders').insert([canonicalMulti]);
+              insErr = res2.error;
+            }
+
+            if (insErr && (insErr.code === 'PGRST204' || insErr.message?.includes('column'))) {
+              const minimalMulti = {
                 order_number: finalOrderId,
                 customer_name: finalName,
-                phone: finalPhone,
+                customer_phone: finalPhone,
                 delivery_address: finalAddress,
-                delivery_area: finalArea,
                 total_amount: Math.max(1, finalTotal),
-                delivery_charge: finalCharge,
-                payment_method: finalMethod || 'COD',
-                payment_status: 'pending',
-                order_status: 'pending',
-                courier_service: finalCourier,
-                product_name: items.map((it: any) => it.nameBn || it.name || it.productName || it.title).filter(Boolean).join(', ') || finalProdName,
-                product_code: items[0]?.productId || items[0]?.productCode || finalProdCode,
-                product_image: items[0]?.image || finalProdImg,
-                quantity: items.reduce((sum: number, it: any) => sum + (Number(it.quantity) || 1), 0)
+                items: jsonbMultiItems
               };
+              const res3 = await serverSupabase.from('orders').insert([minimalMulti]);
+              insErr = res3.error;
+            }
 
-              const { error: insErr } = await serverSupabase.from('orders').insert([sbMultiPayload]);
-              if (!insErr) {
-                console.info(`[Server POST /api/orders] Multi-item order #${finalOrderId} saved to Supabase.`);
-                const itemRows = items.map((it: any) => {
-                  const itQty = Math.max(1, Number(it.quantity || it.qty || 1));
-                  const itPrice = Number(it.price || it.unitPrice || (finalTotal / items.length));
-                  return {
-                    order_id: sbOrderId,
-                    product_id: null,
-                    product_name: String(it.nameBn || it.name || it.productName || it.title || 'পণ্য').trim(),
-                    quantity: itQty,
-                    unit_price: itPrice,
-                    subtotal: itPrice * itQty
-                  };
-                });
-                await serverSupabase.from('order_items').insert(itemRows);
-              } else {
-                console.warn('[Server POST /api/orders] Supabase multi-item insert notice:', insErr.message);
-              }
+            if (!insErr) {
+              console.info(`[Server POST /api/orders] Multi-item order #${finalOrderId} saved to Supabase.`);
+              const itemRows = items.map((it: any) => {
+                const itQty = Math.max(1, Number(it.quantity || it.qty || 1));
+                const itPrice = Number(it.price || it.unitPrice || (finalTotal / items.length));
+                return {
+                  order_id: sbOrderId,
+                  product_id: null,
+                  product_name: String(it.nameBn || it.name || it.productName || it.title || 'পণ্য').trim(),
+                  quantity: itQty,
+                  unit_price: itPrice,
+                  subtotal: itPrice * itQty
+                };
+              });
+              await serverSupabase.from('order_items').insert(itemRows);
+            } else {
+              console.warn('[Server POST /api/orders] Supabase multi-item insert notice:', insErr.message);
             }
           } catch (sbMultiErr) {
             console.warn('[Server POST /api/orders] Supabase multi-item insert error:', sbMultiErr);
@@ -7922,56 +8129,86 @@ Output strict JSON:
         orderRecord = unifiedOrderRecord;
         persistOrdersToFile();
       } else {
-        // SINGLE ITEM ORDER: Exact 17-column Supabase PostgreSQL schema payload
+        // SINGLE ITEM ORDER: Canonical payload conforming to public.orders table
         const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(finalOrderId);
         const sbOrderId = isUuid ? finalOrderId : crypto.randomUUID();
 
-        const supabaseOrderPayload = {
+        const jsonbSingleItems = items && Array.isArray(items) && items.length > 0 ? items : [{
+          productId: finalProdCode,
+          productCode: finalProdCode,
+          productName: finalProdName,
+          nameBn: finalProdName,
+          quantity: finalQty,
+          price: finalTotal,
+          image: finalProdImg
+        }];
+
+        // Level 1: Canonical Base Payload conforming to public.orders table
+        const canonicalSingle = {
           id: sbOrderId,
           order_number: finalOrderId,
           customer_name: finalName,
-          phone: finalPhone,
+          customer_phone: finalPhone,
           delivery_address: finalAddress,
-          delivery_area: finalArea,
+          items: jsonbSingleItems,
           total_amount: Math.max(1, finalTotal),
-          delivery_charge: finalCharge,
-          payment_method: finalMethod || 'COD',
+          payment_method: 'COD',
           payment_status: 'pending',
-          order_status: 'pending',
+          order_status: 'pending'
+        };
+
+        // Level 2: Extended Payload with optional columns
+        const extendedSingle = {
+          ...canonicalSingle,
+          phone: finalPhone,
+          delivery_area: finalArea,
+          district: finalArea,
+          delivery_charge: finalCharge,
           courier_service: finalCourier,
           product_name: finalProdName,
           product_code: finalProdCode,
           product_image: finalProdImg,
-          quantity: finalQty
+          quantity: finalQty,
+          status: 'pending'
         };
 
         if (serverSupabase) {
           try {
-            // Deduplication check in Supabase: prevent duplicate row creation
-            const { data: existingSb } = await serverSupabase
-              .from('orders')
-              .select('id')
-              .eq('order_number', finalOrderId)
-              .maybeSingle();
+            let insErr: any = null;
+            const res1 = await serverSupabase.from('orders').insert([extendedSingle]);
+            insErr = res1.error;
 
-            if (existingSb) {
-              console.info(`[Server POST /api/orders] Order #${finalOrderId} already registered in Supabase (Deduplicated).`);
+            if (insErr && (insErr.code === 'PGRST204' || insErr.message?.includes('column') || insErr.message?.includes('check constraint'))) {
+              const res2 = await serverSupabase.from('orders').insert([canonicalSingle]);
+              insErr = res2.error;
+            }
+
+            if (insErr && (insErr.code === 'PGRST204' || insErr.message?.includes('column'))) {
+              const minimalSingle = {
+                order_number: finalOrderId,
+                customer_name: finalName,
+                customer_phone: finalPhone,
+                delivery_address: finalAddress,
+                total_amount: Math.max(1, finalTotal),
+                items: jsonbSingleItems
+              };
+              const res3 = await serverSupabase.from('orders').insert([minimalSingle]);
+              insErr = res3.error;
+            }
+
+            if (!insErr) {
+              console.info(`[Server POST /api/orders] Single-item order #${finalOrderId} saved to Supabase.`);
+              const itemRows = [{
+                order_id: sbOrderId,
+                product_id: null,
+                product_name: String(finalProdName).trim(),
+                quantity: finalQty,
+                unit_price: finalTotal,
+                subtotal: finalTotal
+              }];
+              await serverSupabase.from('order_items').insert(itemRows);
             } else {
-              const { error: insErr } = await serverSupabase.from('orders').insert([supabaseOrderPayload]);
-              if (!insErr) {
-                console.info(`[Server POST /api/orders] Single-item order #${finalOrderId} saved to Supabase.`);
-                const itemRows = [{
-                  order_id: sbOrderId,
-                  product_id: null,
-                  product_name: String(finalProdName).trim(),
-                  quantity: finalQty,
-                  unit_price: finalTotal,
-                  subtotal: finalTotal
-                }];
-                await serverSupabase.from('order_items').insert(itemRows);
-              } else {
-                console.warn('[Server POST /api/orders] Supabase single-item insert notice:', insErr.message);
-              }
+              console.warn('[Server POST /api/orders] Supabase single-item insert notice:', insErr.message);
             }
           } catch (sbSingleErr) {
             console.warn('[Server POST /api/orders] Supabase single-item insert error:', sbSingleErr);
@@ -7979,7 +8216,7 @@ Output strict JSON:
         }
 
         orderRecord = mapOrderRow({
-          ...supabaseOrderPayload,
+          ...extendedSingle,
           id: finalOrderId,
           order_number: finalOrderId,
           created_at: new Date().toISOString(),
@@ -8350,19 +8587,7 @@ Output strict JSON:
 
       if (serverSupabase) {
         try {
-          const isUuid = isValidUuid(targetId);
-          if (isUuid) {
-            await serverSupabase.from('order_items').delete().eq('order_id', targetId);
-            await serverSupabase.from('orders').delete().or(`id.eq.${targetId},order_number.eq.${targetId}`);
-          } else {
-            const { data: matchedRows } = await serverSupabase.from('orders').select('id').eq('order_number', targetId);
-            if (matchedRows && matchedRows.length > 0) {
-              const ids = matchedRows.map(r => r.id);
-              await serverSupabase.from('order_items').delete().in('order_id', ids);
-              await serverSupabase.from('orders').delete().in('id', ids);
-            }
-            await serverSupabase.from('orders').delete().eq('order_number', targetId);
-          }
+          await serverSupabase.from('orders').delete().or(`id.eq.${targetId},order_number.eq.${targetId}`);
         } catch (sbErr) {
           console.warn('[Supabase Customer Delete Note]:', sbErr);
         }
@@ -8535,15 +8760,8 @@ Output strict JSON:
         try {
           const isUuid = isValidUuid(targetId);
           if (isUuid) {
-            await serverSupabase.from('order_items').delete().eq('order_id', targetId);
             await serverSupabase.from('orders').delete().or(`id.eq.${targetId},order_number.eq.${targetId}`);
           } else {
-            const { data: matchedRows } = await serverSupabase.from('orders').select('id').eq('order_number', targetId);
-            if (matchedRows && matchedRows.length > 0) {
-              const ids = matchedRows.map(r => r.id);
-              await serverSupabase.from('order_items').delete().in('order_id', ids);
-              await serverSupabase.from('orders').delete().in('id', ids);
-            }
             await serverSupabase.from('orders').delete().eq('order_number', targetId);
           }
         } catch (sbErr) {
@@ -8585,10 +8803,18 @@ Output strict JSON:
       }
       if (serverSupabase) {
         try {
-          await serverSupabase.from('orders').update({
-            status: targetStatus,
-            order_status: targetStatus
-          }).or(`id.eq.${targetId},order_number.eq.${targetId}`);
+          const isUuid = isValidUuid(targetId);
+          if (isUuid) {
+            await serverSupabase.from('orders').update({
+              status: targetStatus,
+              order_status: targetStatus
+            }).or(`id.eq.${targetId},order_number.eq.${targetId}`);
+          } else {
+            await serverSupabase.from('orders').update({
+              status: targetStatus,
+              order_status: targetStatus
+            }).eq('order_number', targetId);
+          }
         } catch (sbErr) {
           console.warn('[Supabase Patch Status Note]:', sbErr);
         }
@@ -8617,6 +8843,11 @@ Output strict JSON:
     } catch (err) {
       res.status(500).json({ success: false, message: 'Failed to update order status' });
     }
+  });
+
+  app.patch('/api/orders/:id/status', async (req, res, next) => {
+    req.body = { ...req.body, orderId: req.params.id, id: req.params.id };
+    return (app as any)._router.handle({ ...req, url: '/api/orders/status', originalUrl: '/api/orders/status' }, res, next);
   });
 
   // Bulk Status Update endpoint: Allows updating dozens or hundreds of orders simultaneously in 1 click
@@ -8693,32 +8924,40 @@ Output strict JSON:
 
       const requestedSet = new Set(orderIds.map((id: any) => String(id).trim()));
 
-      // Process eligible orders for deletion
-      const eligibleIds = new Set<string>();
+      // Identify which orders are locked (Packaging, Courier, Deliver)
       const lockedIds = new Set<string>();
+      const eligibleIds = new Set<string>();
 
       for (const id of requestedSet) {
-        eligibleIds.add(id);
+        const matching = liveProductOrders.filter(o => {
+          const oId = String(o.id || '').trim();
+          const oNum = String(o.orderNumber || '').trim();
+          const oOrdId = String(o.orderId || '').trim();
+          return oId === id || oNum === id || oOrdId === id ||
+            (id.length >= 6 && (oId.startsWith(id) || oNum.startsWith(id) || oOrdId.startsWith(id)));
+        });
+
+        const isLocked = matching.some(o => {
+          const st = String(o.status || o.order_status || o.orderStatus || '').toLowerCase();
+          return st.includes('pack') || st.includes('প্যাকিং') || st.includes('প্যাকেজিং') ||
+                 st.includes('ship') || st.includes('transit') || st.includes('courier') || st.includes('কুরিয়ার') ||
+                 st.includes('deliver') || st.includes('সম্পন্ন');
+        });
+
+        if (isLocked) {
+          lockedIds.add(id);
+        } else {
+          eligibleIds.add(id);
+        }
       }
 
       if (eligibleIds.size > 0 && serverSupabase) {
         try {
           const idList = Array.from(eligibleIds);
-          const uuidList = idList.filter(id => isValidUuid(id));
-          const orderNumList = idList.filter(id => !isValidUuid(id));
-
-          if (uuidList.length > 0) {
-            await serverSupabase.from('order_items').delete().in('order_id', uuidList);
-            await serverSupabase.from('orders').delete().in('id', uuidList);
-          }
-          if (orderNumList.length > 0) {
-            const { data: matchedRows } = await serverSupabase.from('orders').select('id').in('order_number', orderNumList);
-            if (matchedRows && matchedRows.length > 0) {
-              const ids = matchedRows.map((r: any) => r.id);
-              await serverSupabase.from('order_items').delete().in('order_id', ids);
-              await serverSupabase.from('orders').delete().in('id', ids);
-            }
-            await serverSupabase.from('orders').delete().in('order_number', orderNumList);
+          for (let i = 0; i < idList.length; i += 40) {
+            const chunk = idList.slice(i, i + 40);
+            const orFilter = chunk.map(id => `id.eq.${id},order_number.eq.${id}`).join(',');
+            await serverSupabase.from('orders').delete().or(orFilter);
           }
         } catch (sbErr) {
           console.warn('[Supabase Bulk Delete Note]:', sbErr);
